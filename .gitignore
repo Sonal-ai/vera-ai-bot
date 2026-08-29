@@ -1,0 +1,29 @@
+# Environment & secrets
+.env
+*.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dataset (too large, not needed in repo)
+expanded/
+
+# Debug scripts
+debug_llm.py
