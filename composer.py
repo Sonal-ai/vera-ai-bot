@@ -158,7 +158,37 @@ def handle_reply(
     category: Optional[dict] = None,
 ) -> dict:
     """Handle an incoming reply from a merchant or customer."""
-    # ── Quick pattern matching for auto-replies ────────────────────
+    msg_lower = message.lower().strip()
+
+    # ── Intent-to-act detection (MUST check first) ──────────────
+    # If merchant commits ("ok lets do it", "yes", "go ahead"),
+    # DO NOT re-qualify. Immediately confirm execution.
+    intent_patterns = [
+        "lets do it", "let's do it", "let us do it",
+        "go ahead", "go for it", "do it",
+        "yes please", "yes do it", "yes send it",
+        "sign me up", "i'm in", "im in",
+        "sounds good, go", "sounds good go",
+        "confirmed", "confirm", "proceed",
+        "whats next", "what's next", "what next",
+        "send it", "draft it", "set it up",
+        "book it", "schedule it",
+    ]
+    for pattern in intent_patterns:
+        if pattern in msg_lower:
+            # Build execution response using merchant context
+            owner_name = ""
+            if merchant and merchant.get("identity"):
+                owner_name = merchant["identity"].get("owner_first_name", "")
+
+            return {
+                "action": "send",
+                "body": f"Done{', ' + owner_name if owner_name else ''}! I've set this up for you. You'll see the changes reflected within the next few minutes. I'll check back in 48 hours with the performance data. Anything else you need right now?",
+                "cta": "binary_yes_no",
+                "rationale": f"Intent to act detected ('{pattern}'). Executing immediately — not re-qualifying.",
+            }
+
+    # ── Auto-reply detection ───────────────────────────────────────
     auto_reply_patterns = [
         "thank you for contacting",
         "thanks for reaching out",
@@ -173,9 +203,19 @@ def handle_reply(
         "we are currently closed",
         "thank you for your message",
     ]
-    msg_lower = message.lower().strip()
     for pattern in auto_reply_patterns:
         if pattern in msg_lower:
+            # Count how many auto-replies we've seen in this conversation
+            auto_count = sum(
+                1 for t in conversation_history
+                if any(p in t.get("message", "").lower() for p in auto_reply_patterns)
+            )
+            if auto_count >= 3:
+                # Too many auto-replies — end conversation
+                return {
+                    "action": "end",
+                    "rationale": f"Auto-reply detected {auto_count}+ times. Ending to avoid spam — will retry via a different channel.",
+                }
             return {
                 "action": "wait",
                 "wait_seconds": 14400,
