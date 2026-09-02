@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import List
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
@@ -120,106 +121,122 @@ def receive_context(req: ContextRequest) -> JSONResponse:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# POST /v1/tick
+# POST /v1/tick (Parallelized with ThreadPoolExecutor)
 # ═══════════════════════════════════════════════════════════════════
+
+def _process_single_trigger(trigger_id: str) -> Optional[TickAction]:
+    """Process a single trigger and return a TickAction, or None if skipped/failed."""
+    # Look up the trigger
+    trigger = store.get("trigger", trigger_id)
+    if not trigger:
+        logger.warning(f"Trigger not found in store: {trigger_id}")
+        return None
+
+    # Check suppression
+    suppression_key = trigger.get("suppression_key", "")
+    if suppression_key and store.is_suppressed(suppression_key):
+        logger.info(f"Trigger suppressed: {trigger_id} ({suppression_key})")
+        return None
+
+    # Resolve merchant
+    merchant_id = trigger.get("merchant_id")
+    merchant = store.get("merchant", merchant_id) if merchant_id else None
+
+    # Resolve customer (for customer-scoped triggers)
+    customer_id = trigger.get("customer_id")
+    customer = store.get("customer", customer_id) if customer_id else None
+
+    # Resolve category
+    category_slug = None
+    if merchant:
+        category_slug = merchant.get("category_slug")
+    if not category_slug:
+        # Try to infer from trigger ID (e.g. "trg_001_research_digest_dentists")
+        for cat in ("dentists", "salons", "restaurants", "gyms", "pharmacies"):
+            if cat in trigger_id.lower():
+                category_slug = cat
+                break
+    category = store.get("category", category_slug) if category_slug else None
+
+    # Build conversation ID early (needed for anti-repetition)
+    conv_parts = ["conv"]
+    if merchant_id:
+        conv_parts.append(merchant_id.replace("m_", ""))
+    if customer_id:
+        conv_parts.append(customer_id.replace("c_", ""))
+    trigger_kind = trigger.get("kind", "msg")
+    conv_parts.append(trigger_kind)
+    conversation_id = "_".join(conv_parts)
+
+    # Compose the message
+    try:
+        result = composer.compose(
+            category=category,
+            merchant=merchant,
+            trigger=trigger,
+            customer=customer,
+            conversation_id=conversation_id,
+        )
+    except Exception as e:
+        logger.error(f"Compose failed for {trigger_id}: {e}")
+        return None
+
+    body = result.get("body", "")
+    if not body:
+        logger.warning(f"Empty body for trigger {trigger_id}, skipping")
+        return None
+
+    # Determine send_as
+    send_as = result.get("send_as", "vera")
+    if customer and trigger.get("scope") == "customer":
+        send_as = "merchant_on_behalf"
+
+    # Build the action
+    action = TickAction(
+        conversation_id=conversation_id,
+        merchant_id=merchant_id or "unknown",
+        customer_id=customer_id,
+        send_as=send_as,
+        trigger_id=trigger_id,
+        body=body,
+        cta=result.get("cta", "open_ended"),
+        suppression_key=result.get("suppression_key", suppression_key),
+        rationale=result.get("rationale", f"Trigger: {trigger_kind}"),
+    )
+
+    # Mark as suppressed so we don't re-send in the same session
+    if suppression_key:
+        store.suppress(suppression_key)
+
+    # Track conversation
+    store.add_conversation_turn(conversation_id, "vera", body, turn=1)
+
+    logger.info(
+        f"Action composed: {trigger_id} → {merchant_id}"
+        f" | cta={action.cta} | len={len(body)}"
+    )
+    return action
+
 
 @app.post("/v1/tick")
 def tick(req: TickRequest) -> dict:
+    valid_triggers = req.available_triggers[:config.MAX_ACTIONS_PER_TICK]
     actions: List[TickAction] = []
 
-    for trigger_id in req.available_triggers:
-        if len(actions) >= config.MAX_ACTIONS_PER_TICK:
-            break
+    if not valid_triggers:
+        return TickResponse(actions=[]).model_dump()
 
-        # Look up the trigger
-        trigger = store.get("trigger", trigger_id)
-        if not trigger:
-            logger.warning(f"Trigger not found in store: {trigger_id}")
-            continue
-
-        # Check suppression
-        suppression_key = trigger.get("suppression_key", "")
-        if store.is_suppressed(suppression_key):
-            logger.info(f"Trigger suppressed: {trigger_id} ({suppression_key})")
-            continue
-
-        # Resolve merchant
-        merchant_id = trigger.get("merchant_id")
-        merchant = store.get("merchant", merchant_id) if merchant_id else None
-
-        # Resolve customer (for customer-scoped triggers)
-        customer_id = trigger.get("customer_id")
-        customer = store.get("customer", customer_id) if customer_id else None
-
-        # Resolve category
-        category_slug = None
-        if merchant:
-            category_slug = merchant.get("category_slug")
-        if not category_slug:
-            # Try to infer from trigger ID (e.g. "trg_001_research_digest_dentists")
-            for cat in ("dentists", "salons", "restaurants", "gyms", "pharmacies"):
-                if cat in trigger_id.lower():
-                    category_slug = cat
-                    break
-        category = store.get("category", category_slug) if category_slug else None
-
-        # Compose the message
-        try:
-            result = composer.compose(
-                category=category,
-                merchant=merchant,
-                trigger=trigger,
-                customer=customer,
-            )
-        except Exception as e:
-            logger.error(f"Compose failed for {trigger_id}: {e}")
-            continue
-
-        body = result.get("body", "")
-        if not body:
-            logger.warning(f"Empty body for trigger {trigger_id}, skipping")
-            continue
-
-        # Build a meaningful conversation ID
-        conv_parts = ["conv"]
-        if merchant_id:
-            conv_parts.append(merchant_id.replace("m_", ""))
-        if customer_id:
-            conv_parts.append(customer_id.replace("c_", ""))
-        trigger_kind = trigger.get("kind", "msg")
-        conv_parts.append(trigger_kind)
-        conversation_id = "_".join(conv_parts)
-
-        # Determine send_as
-        send_as = result.get("send_as", "vera")
-        if customer and trigger.get("scope") == "customer":
-            send_as = "merchant_on_behalf"
-
-        # Build the action
-        action = TickAction(
-            conversation_id=conversation_id,
-            merchant_id=merchant_id or "unknown",
-            customer_id=customer_id,
-            send_as=send_as,
-            trigger_id=trigger_id,
-            body=body,
-            cta=result.get("cta", "open_ended"),
-            suppression_key=result.get("suppression_key", suppression_key),
-            rationale=result.get("rationale", f"Trigger: {trigger_kind}"),
-        )
-        actions.append(action)
-
-        # Mark as suppressed so we don't re-send in the same session
-        if suppression_key:
-            store.suppress(suppression_key)
-
-        # Track conversation
-        store.add_conversation_turn(conversation_id, "vera", body, turn=1)
-
-        logger.info(
-            f"Action composed: {trigger_id} → {merchant_id}"
-            f" | cta={action.cta} | len={len(body)}"
-        )
+    # Execute composition in parallel to stay well within the 30s timeout cap
+    workers = min(len(valid_triggers), 8)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_process_single_trigger, tid) for tid in valid_triggers]
+        for future in futures:
+            try:
+                action = future.result()
+                if action:
+                    actions.append(action)
+            except Exception as e:
+                logger.error(f"Error processing trigger: {e}")
 
     return TickResponse(actions=actions).model_dump()
 
