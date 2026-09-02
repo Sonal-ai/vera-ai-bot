@@ -16,11 +16,12 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 import composer
 import config
 from context_store import ContextStore
+from ui import HTML_CONTENT
 from models import (
     ContextRequest,
     ContextResponse,
@@ -44,6 +45,16 @@ logger = logging.getLogger("vera.main")
 app = FastAPI(title="Vera AI Bot", version=config.BOT_VERSION)
 store = ContextStore()
 START_TIME = time.time()
+
+
+# ═══════════════════════════════════════════════════════════════════
+# GET / (Interactive Web Console & WhatsApp Simulator)
+# ═══════════════════════════════════════════════════════════════════
+
+@app.get("/", response_class=HTMLResponse)
+def root():
+    """Interactive Merchant AI Console & Live WhatsApp Simulator."""
+    return HTMLResponse(content=HTML_CONTENT)
 
 
 # ═══════════════════════════════════════════════════════════════════
