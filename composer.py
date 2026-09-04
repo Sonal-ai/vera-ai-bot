@@ -43,6 +43,9 @@ _generation_config = genai.types.GenerationConfig(
 
 def _get_model() -> genai.GenerativeModel:
     """Create a fresh model instance (thread-safe)."""
+    api_key = config.get_api_key()
+    if api_key:
+        genai.configure(api_key=api_key)
     return genai.GenerativeModel(
         model_name=config.GEMINI_MODEL,
         generation_config=_generation_config,
