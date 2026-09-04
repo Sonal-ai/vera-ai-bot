@@ -71,7 +71,7 @@ class ReplyRequest(BaseModel):
     customer_id: Optional[str] = None
     from_role: Literal["merchant", "customer"]
     message: str
-    received_at: str
+    received_at: Optional[str] = None
     turn_number: int
 
 

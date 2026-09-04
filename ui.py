@@ -1,11 +1,11 @@
 """Modern, 100% Dynamic Web UI for Vera AI Assistant & Merchant Intelligence Console.
 
 Served at GET /
-Zero dummy/static data:
-- Dynamically queries /v1/state for real loaded merchants, categories, and triggers
-- Real WhatsApp conversation simulator connected live to /v1/reply and /v1/tick
-- Interactive merchant switcher across all loaded verticals
-- Real-time prompt rationale, JSON contract inspector, and telemetry monitor
+Features:
+- Isolated per-merchant conversation tabs (switching merchants shows only that merchant's chat)
+- Live /v1/reply and /v1/tick integration with ISO 8601 timestamps (received_at)
+- Real-time prompt rationale and JSON contract inspector
+- Live merchant switcher across all verticals (Dentists, Salons, Gyms, Restaurants, Pharmacies)
 """
 
 HTML_CONTENT = """<!DOCTYPE html>
@@ -125,29 +125,29 @@ HTML_CONTENT = """<!DOCTYPE html>
     .mx-tag.delta-up { color: #34d399; }
     .mx-tag.delta-down { color: #f87171; }
 
-    .chat-area { background: #060b13; display: flex; flex-direction: column; position: relative; }
+    .chat-area { background: #060b13; display: flex; flex-direction: column; position: relative; padding: 12px; overflow: hidden; }
     .phone-container {
-      max-width: 540px; width: 100%; margin: 12px auto;
+      max-width: 580px; width: 100%; margin: 0 auto;
       background: var(--bg-chat); border-radius: 16px;
       border: 1px solid #303d45; display: flex; flex-direction: column;
-      height: calc(100% - 24px); box-shadow: 0 20px 40px rgba(0,0,0,0.5);
+      height: 100%; box-shadow: 0 20px 40px rgba(0,0,0,0.5);
       overflow: hidden;
     }
 
     .wa-top {
       background: var(--wa-header); padding: 12px 16px;
-      display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #2a3942;
+      display: flex; align-items: center; gap: 12px; border-bottom: 1px solid #2a3942; flex-shrink: 0;
     }
     .wa-avatar {
       width: 40px; height: 40px; border-radius: 50%;
       background: #e11d48; display: grid; place-items: center;
-      color: white; font-weight: 700; font-size: 16px;
+      color: white; font-weight: 700; font-size: 16px; flex-shrink: 0;
     }
     .wa-name { font-weight: 600; font-size: 15px; }
     .wa-status { font-size: 12px; color: #8696a0; }
 
     .wa-messages {
-      flex: 1; padding: 16px; overflow-y: auto;
+      flex: 1; padding: 16px; overflow-y: auto; overflow-x: hidden;
       display: flex; flex-direction: column; gap: 12px;
       background-image: radial-gradient(#1f2c34 1px, transparent 1px);
       background-size: 16px 16px;
@@ -161,18 +161,20 @@ HTML_CONTENT = """<!DOCTYPE html>
     .msg-meta { font-size: 10px; color: #8696a0; margin-top: 4px; text-align: right; }
 
     .scenario-chips {
-      padding: 8px 14px; background: #111b21; border-top: 1px solid #222e35;
-      display: flex; gap: 8px; overflow-x: auto; white-space: nowrap;
+      padding: 8px 12px; background: #111b21; border-top: 1px solid #222e35;
+      display: flex; gap: 8px; overflow-x: auto; white-space: nowrap; flex-shrink: 0;
+      scrollbar-width: none;
     }
+    .scenario-chips::-webkit-scrollbar { display: none; }
     .chip {
       background: #202c33; color: #00a884; border: 1px solid #2a3942;
       padding: 6px 12px; border-radius: 16px; font-size: 12px;
-      cursor: pointer; font-weight: 500; transition: all 0.15s;
+      cursor: pointer; font-weight: 500; transition: all 0.15s; flex-shrink: 0;
     }
     .chip:hover { background: #005c4b; color: white; }
 
     .wa-input-box {
-      background: #202c33; padding: 10px 14px; display: flex; gap: 10px; align-items: center;
+      background: #202c33; padding: 10px 14px; display: flex; gap: 10px; align-items: center; flex-shrink: 0;
     }
     .wa-input {
       flex: 1; background: #2a3942; border: none; color: #d1d7db;
@@ -181,7 +183,7 @@ HTML_CONTENT = """<!DOCTYPE html>
     .wa-send-btn {
       background: #00a884; border: none; color: white;
       width: 38px; height: 38px; border-radius: 50%;
-      display: grid; place-items: center; cursor: pointer; font-size: 16px;
+      display: grid; place-items: center; cursor: pointer; font-size: 16px; flex-shrink: 0;
     }
 
     .score-card {
@@ -237,8 +239,7 @@ HTML_CONTENT = """<!DOCTYPE html>
       </div>
       <div class="merchant-list" id="merchant-list">
         <div style="padding: 16px; color: var(--text-muted); font-size: 13px; text-align: center;">
-          No merchants in memory yet.<br><br>
-          <button class="btn btn-secondary" style="margin: 0 auto;" onclick="loadRealSeeds()">Load Real Seed Dataset</button>
+          Loading merchants...
         </div>
       </div>
 
@@ -262,10 +263,7 @@ HTML_CONTENT = """<!DOCTYPE html>
         </div>
 
         <div class="wa-messages" id="chat-messages">
-          <div class="msg bot" id="welcome-msg">
-            👋 Welcome to the Vera AI Console! Select a merchant on the left or click <strong>"⚡ Trigger Proactive Tick"</strong> to compose a real grounded message.
-            <div class="msg-meta">Now</div>
-          </div>
+          <!-- Messages dynamically rendered per active merchant -->
         </div>
 
         <!-- Scenario Quick Chips -->
@@ -323,9 +321,11 @@ HTML_CONTENT = """<!DOCTYPE html>
   <script>
     let currentMerchantId = null;
     let currentCategorySlug = null;
-    let currentConvId = "conv_default";
-    let turnCount = 1;
     let stateCache = null;
+
+    // Per-merchant chat message storage: { [merchant_id]: [ { text, role, time } ] }
+    const merchantChats = {};
+    const merchantTurns = {};
 
     async function fetchState() {
       try {
@@ -400,7 +400,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       if (stateCache && stateCache.merchants && stateCache.merchants[mid]) {
         updateActiveMerchantView(stateCache.merchants[mid], catSlug);
       }
-      // Re-render merchant list to update active highlight
       if (stateCache) renderState(stateCache);
     }
 
@@ -409,8 +408,6 @@ HTML_CONTENT = """<!DOCTYPE html>
       document.getElementById("current-mx-title").innerText = identity.name || merchant.merchant_id;
       document.getElementById("current-mx-sub").innerText = `${(catSlug || '').toUpperCase()} • ${identity.owner_first_name ? 'Owner: ' + identity.owner_first_name : 'Verified'}`;
       document.getElementById("current-mx-avatar").innerText = (identity.name || 'V')[0];
-
-      currentConvId = `conv_${merchant.merchant_id}`;
 
       // Update voice preview
       const cat = (stateCache && stateCache.categories) ? stateCache.categories[catSlug] : null;
@@ -426,12 +423,57 @@ HTML_CONTENT = """<!DOCTYPE html>
       } else {
         voiceDiv.innerHTML = `<p>Category: <strong>${(catSlug || 'General').toUpperCase()}</strong></p><p>Tone: Professional, direct business advisor.</p>`;
       }
+
+      // Render conversation for this specific merchant
+      renderChatForActiveMerchant();
+    }
+
+    function renderChatForActiveMerchant() {
+      const container = document.getElementById("chat-messages");
+      container.innerHTML = "";
+
+      if (!currentMerchantId) {
+        container.innerHTML = `<div class="msg bot">👋 Welcome! Select a merchant on the left to begin.</div>`;
+        return;
+      }
+
+      const history = merchantChats[currentMerchantId] || [];
+      if (history.length === 0) {
+        const m = (stateCache && stateCache.merchants) ? stateCache.merchants[currentMerchantId] : null;
+        const name = m && m.identity ? m.identity.name : currentMerchantId;
+        container.innerHTML = `
+          <div class="msg bot">
+            👋 Connected to <strong>${name}</strong>. Click <strong>"⚡ Trigger Proactive Tick"</strong> to compose a proactive message or type a reply below.
+            <div class="msg-meta">Now</div>
+          </div>`;
+        return;
+      }
+
+      history.forEach(m => {
+        const msgDiv = document.createElement("div");
+        msgDiv.className = `msg ${m.role}`;
+        msgDiv.innerHTML = `${m.text}<div class="msg-meta">${m.time}</div>`;
+        container.appendChild(msgDiv);
+      });
+
+      container.scrollTop = container.scrollHeight;
+    }
+
+    function appendMessageToMerchant(text, role, merchantId = currentMerchantId) {
+      if (!merchantId) return;
+      if (!merchantChats[merchantId]) merchantChats[merchantId] = [];
+      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      merchantChats[merchantId].push({ text, role, time });
+
+      if (merchantId === currentMerchantId) {
+        renderChatForActiveMerchant();
+      }
     }
 
     async function loadRealSeeds() {
       try {
         const resp = await fetch("/v1/load-seed", { method: "POST" });
-        const res = await resp.json();
+        await resp.json();
         await fetchState();
       } catch (e) {
         alert("Load seed error: " + e);
@@ -441,11 +483,17 @@ HTML_CONTENT = """<!DOCTYPE html>
     async function sendUserMessage() {
       const input = document.getElementById("user-input");
       const text = input.value.trim();
-      if (!text) return;
+      if (!text || !currentMerchantId) return;
 
-      appendMessage(text, "merchant");
+      const targetMid = currentMerchantId;
+      appendMessageToMerchant(text, "merchant", targetMid);
       input.value = "";
-      turnCount++;
+
+      if (!merchantTurns[targetMid]) merchantTurns[targetMid] = 1;
+      merchantTurns[targetMid]++;
+      const currentTurn = merchantTurns[targetMid];
+
+      const convId = `conv_${targetMid}`;
 
       const t0 = performance.now();
       try {
@@ -453,11 +501,12 @@ HTML_CONTENT = """<!DOCTYPE html>
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            conversation_id: currentConvId,
-            merchant_id: currentMerchantId || "m_001_drmeera_dentist_delhi",
+            conversation_id: convId,
+            merchant_id: targetMid,
             from_role: "merchant",
             message: text,
-            turn_number: turnCount
+            received_at: new Date().toISOString(),
+            turn_number: currentTurn
           })
         });
         const data = await resp.json();
@@ -465,17 +514,17 @@ HTML_CONTENT = """<!DOCTYPE html>
         document.getElementById("latency-stat").innerText = `${lat}ms`;
 
         if (data.action === "send" && data.body) {
-          appendMessage(data.body, "bot");
+          appendMessageToMerchant(data.body, "bot", targetMid);
         } else if (data.action === "wait") {
-          appendMessage(`⏳ [Vera paused for ${data.wait_seconds}s — Auto-reply detected]`, "bot");
+          appendMessageToMerchant(`⏳ [Vera waiting for ${data.wait_seconds}s — Auto-reply detected]`, "bot", targetMid);
         } else if (data.action === "end") {
-          appendMessage(`🛑 [Conversation gracefully ended — ${data.rationale}]`, "bot");
+          appendMessageToMerchant(`🛑 [Conversation ended gracefully — ${data.rationale}]`, "bot", targetMid);
         }
 
         document.getElementById("rationale-text").innerText = data.rationale || "Contextual reply generated";
         document.getElementById("json-output").innerText = JSON.stringify(data, null, 2);
       } catch (e) {
-        appendMessage("⚠️ Error communicating with Vera server: " + e, "bot");
+        appendMessageToMerchant("⚠️ Error communicating with server: " + e, "bot", targetMid);
       }
     }
 
@@ -487,7 +536,6 @@ HTML_CONTENT = """<!DOCTYPE html>
     async function triggerTick() {
       const t0 = performance.now();
       try {
-        // Find triggers in state or fallback to default
         let availableTriggers = [];
         if (stateCache && stateCache.triggers) {
           const allTrigKeys = Object.keys(stateCache.triggers);
@@ -514,29 +562,18 @@ HTML_CONTENT = """<!DOCTYPE html>
 
         if (data.actions && data.actions.length > 0) {
           data.actions.forEach(action => {
-            appendMessage(action.body, "bot");
+            appendMessageToMerchant(action.body, "bot", action.merchant_id || currentMerchantId);
             document.getElementById("rationale-text").innerText = action.rationale;
             document.getElementById("json-output").innerText = JSON.stringify(action, null, 2);
           });
         } else {
-          appendMessage("ℹ️ No new unsuppressed triggers to fire right now.", "bot");
+          appendMessageToMerchant("ℹ️ No new unsuppressed triggers to fire right now.", "bot", currentMerchantId);
         }
       } catch (e) {
         alert("Tick failed: " + e);
       }
     }
 
-    function appendMessage(text, role) {
-      const container = document.getElementById("chat-messages");
-      const msgDiv = document.createElement("div");
-      msgDiv.className = `msg ${role}`;
-      const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      msgDiv.innerHTML = `${text}<div class="msg-meta">${time}</div>`;
-      container.appendChild(msgDiv);
-      container.scrollTop = container.scrollHeight;
-    }
-
-    // Auto-fetch on boot
     window.addEventListener("DOMContentLoaded", () => {
       fetchState();
     });
