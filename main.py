@@ -10,9 +10,11 @@ Exposes the 5 endpoints required by the magicpin AI Challenge judge:
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -41,10 +43,85 @@ logging.basicConfig(
 )
 logger = logging.getLogger("vera.main")
 
+
+# ── Seed Data Loader ───────────────────────────────────────────────
+def load_seed_data(store_instance: ContextStore) -> dict:
+    """Load canonical challenge dataset files into memory store."""
+    data_dir = Path(__file__).parent / "data"
+    if not data_dir.exists():
+        return {"loaded": False, "reason": "data directory not found"}
+
+    counts = {"categories": 0, "merchants": 0, "customers": 0, "triggers": 0}
+
+    # 1. Categories
+    cat_dir = data_dir / "categories"
+    if cat_dir.exists():
+        for cat_file in cat_dir.glob("*.json"):
+            slug = cat_file.stem
+            try:
+                with open(cat_file, "r", encoding="utf-8") as f:
+                    cat_data = json.load(f)
+                store_instance.upsert("category", slug, 1, cat_data)
+                counts["categories"] += 1
+            except Exception as e:
+                logger.warning(f"Failed to load category {cat_file}: {e}")
+
+    # 2. Merchants
+    mx_file = data_dir / "merchants_seed.json"
+    if mx_file.exists():
+        try:
+            with open(mx_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            merchants = data.get("merchants", data if isinstance(data, list) else [])
+            for m in merchants:
+                mid = m.get("merchant_id")
+                if mid:
+                    store_instance.upsert("merchant", mid, 1, m)
+                    counts["merchants"] += 1
+        except Exception as e:
+            logger.warning(f"Failed to load merchants: {e}")
+
+    # 3. Customers
+    cx_file = data_dir / "customers_seed.json"
+    if cx_file.exists():
+        try:
+            with open(cx_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            customers = data.get("customers", data if isinstance(data, list) else [])
+            for c in customers:
+                cid = c.get("customer_id")
+                if cid:
+                    store_instance.upsert("customer", cid, 1, c)
+                    counts["customers"] += 1
+        except Exception as e:
+            logger.warning(f"Failed to load customers: {e}")
+
+    # 4. Triggers
+    trg_file = data_dir / "triggers_seed.json"
+    if trg_file.exists():
+        try:
+            with open(trg_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            triggers = data.get("triggers", data if isinstance(data, list) else [])
+            for t in triggers:
+                tid = t.get("id", t.get("trigger_id"))
+                if tid:
+                    store_instance.upsert("trigger", tid, 1, t)
+                    counts["triggers"] += 1
+        except Exception as e:
+            logger.warning(f"Failed to load triggers: {e}")
+
+    logger.info(f"Loaded real dataset: {counts}")
+    return {"loaded": True, "counts": counts}
+
+
 # ── App & State ────────────────────────────────────────────────────
 app = FastAPI(title="Vera AI Bot", version=config.BOT_VERSION)
 store = ContextStore()
 START_TIME = time.time()
+
+# Auto-seed on startup so web UI has real data immediately
+load_seed_data(store)
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -55,6 +132,29 @@ START_TIME = time.time()
 def root():
     """Interactive Merchant AI Console & Live WhatsApp Simulator."""
     return HTMLResponse(content=HTML_CONTENT)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# GET /v1/state (Live Data for Console UI)
+# ═══════════════════════════════════════════════════════════════════
+
+@app.get("/v1/state")
+def get_state() -> dict:
+    """Return all currently loaded real merchants, categories, and telemetry."""
+    return {
+        "counts": store.counts(),
+        "merchants": store.get_all("merchant"),
+        "categories": store.get_all("category"),
+        "triggers": store.get_all("trigger"),
+        "conversations": store.get_all_conversations(),
+        "uptime_seconds": int(time.time() - START_TIME),
+    }
+
+
+@app.post("/v1/load-seed")
+def load_seed() -> dict:
+    """Load canonical challenge seed datasets into memory store."""
+    return load_seed_data(store)
 
 
 # ═══════════════════════════════════════════════════════════════════

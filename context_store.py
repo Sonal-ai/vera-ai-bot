@@ -105,6 +105,10 @@ class ContextStore:
         with self._lock:
             return list(self._conversations.get(conv_id, []))
 
+    def get_all_conversations(self) -> Dict[str, List[Dict[str, Any]]]:
+        with self._lock:
+            return {cid: list(turns) for cid, turns in self._conversations.items()}
+
     # ── Suppression tracking ───────────────────────────────────────
     def is_suppressed(self, key: str) -> bool:
         if not key:
