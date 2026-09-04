@@ -16,7 +16,7 @@ class ContextRequest(BaseModel):
     context_id: str
     version: int
     payload: Dict[str, Any]
-    delivered_at: str
+    delivered_at: Optional[str] = None
 
 
 class ContextResponse(BaseModel):
